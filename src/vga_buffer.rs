@@ -82,9 +82,8 @@ impl Writer {
 pub fn print_something() {
     let mut writer = Writer {
         column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        color_code: ColorCode::new(Color::Red, Color::Blue),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     };
-    writer.write_byte(b'H');
     writer.write_string("Hello World");
 }
