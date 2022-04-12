@@ -1,8 +1,25 @@
-use core::fmt;
+use core::{fmt, ops::Deref, ops::DerefMut};
 
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
+
+// Println and print macros
+#[macro_export]
+macro_rules! print {
+	($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! println {
+	() => ($crate::print!("\n"));
+	($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    WRITER.lock().write_fmt(args).unwrap();
+}
 
 #[allow(dead_code)]
 #[repr(u8)]
@@ -39,6 +56,19 @@ impl ColorCode {
 struct ScreenChar {
     ascii_character: u8,
     color_code: ColorCode,
+}
+
+impl DerefMut for ScreenChar {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self
+    }
+}
+
+impl Deref for ScreenChar {
+    type Target = ScreenChar;
+    fn deref(&self) -> &Self::Target {
+        self
+    }
 }
 
 pub const BUFFER_HEIGHT: usize = 25;
@@ -96,6 +126,7 @@ impl Writer {
         } else {
             self.row_position += 1;
         }
+        // self.row_position += 1;
         self.column_position = 0;
     }
     fn clear_row(&mut self, row: usize) {
