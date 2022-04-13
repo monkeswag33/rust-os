@@ -1,8 +1,9 @@
-use core::{fmt, ops::Deref, ops::DerefMut};
+use core::fmt;
 
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
+use x86_64::instructions::interrupts;
 
 // Println and print macros
 #[macro_export]
@@ -16,9 +17,23 @@ macro_rules! println {
 	($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+#[macro_export]
+macro_rules! input {
+    () => {
+        $crate::vga_buffer::_input()
+    };
+}
+
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    WRITER.lock().input_mode = false;
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
+}
+
+pub fn _input() {
+    println!("Hello World");
 }
 
 #[allow(dead_code)]
@@ -53,36 +68,31 @@ impl ColorCode {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct ScreenChar {
-    ascii_character: u8,
+pub struct ScreenChar {
+    pub ascii_character: u8,
     color_code: ColorCode,
-}
-
-impl DerefMut for ScreenChar {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self
-    }
-}
-
-impl Deref for ScreenChar {
-    type Target = ScreenChar;
-    fn deref(&self) -> &Self::Target {
-        self
-    }
 }
 
 pub const BUFFER_HEIGHT: usize = 25;
 pub const BUFFER_WIDTH: usize = 80;
 
 pub struct Buffer {
-    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    pub chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
 pub struct Writer {
-    column_position: usize,
-    row_position: usize,
+    pub column_position: usize,
+    pub row_position: usize,
     color_code: ColorCode,
-    buffer: &'static mut Buffer,
+    pub buffer: &'static mut Buffer,
+    pub input_mode: bool,
+}
+
+impl fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_string(s);
+        Ok(())
+    }
 }
 
 impl Writer {
@@ -104,30 +114,51 @@ impl Writer {
             }
         }
     }
+    fn backspace(&mut self) {
+        if self.row_position == 0 && self.column_position == 0 {
+            return;
+        }
+        if self.column_position == 0 {
+            self.row_position -= 1;
+            self.column_position = self.get_last_col(self.row_position);
+            return;
+        }
+        // Set char at that row and col to blank (space)
+        // Push back col position so next char will overwrite that char
+        let blank = ScreenChar {
+            ascii_character: 0x00,
+            color_code: self.color_code,
+        };
+        self.buffer.chars[self.row_position][self.column_position - 1].write(blank);
+        self.column_position -= 1;
+    }
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
+                0x08 => self.backspace(),
                 _ => self.write_byte(0xfe),
             }
         }
     }
     fn new_line(&mut self) {
         if self.row_position == (BUFFER_HEIGHT - 1) {
-            for row in 1..BUFFER_HEIGHT {
-                for col in 0..BUFFER_WIDTH {
-                    let character = self.buffer.chars[row][col].read();
-                    if !(row - 1 <= 0) {
-                        self.buffer.chars[row - 1][col].write(character);
-                    }
-                }
-            }
+            self.shift_up();
             self.clear_row(BUFFER_HEIGHT - 1);
         } else {
             self.row_position += 1;
         }
-        // self.row_position += 1;
         self.column_position = 0;
+    }
+    fn shift_up(&mut self) {
+        for row in 1..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                let character = self.buffer.chars[row][col].read();
+                if !(row <= 0) {
+                    self.buffer.chars[row - 1][col].write(character);
+                }
+            }
+        }
     }
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
@@ -138,12 +169,23 @@ impl Writer {
             self.buffer.chars[row][col].write(blank);
         }
     }
-}
-
-impl fmt::Write for Writer {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_string(s);
-        Ok(())
+    fn get_last_col(&mut self, row: usize) -> usize {
+        // let mut col: usize = 0;
+        // let mut char;
+        // for i in 0..BUFFER_WIDTH {
+        //     char = self.buffer.chars[row][i].read();
+        //     if !char.ascii_character == 0x00 {
+        //         col += 1;
+        //     }
+        // }
+        let mut col: usize = 0; // 0
+        let mut char = self.buffer.chars[row][0].read();
+        while char.ascii_character != 0x00 {
+            // 0x00
+            col += 1; // col -> 2
+            char = self.buffer.chars[row][col].read(); // char -> char at col 2
+        }
+        return col;
     }
 }
 
@@ -152,6 +194,36 @@ lazy_static! {
         column_position: 0,
         row_position: 0,
         color_code: ColorCode::new(Color::White, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) }
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        input_mode: false
     });
+}
+
+// TESTS
+#[test_case]
+fn test_print_one() {
+    print!("Hello World");
+}
+
+#[test_case]
+fn test_print_many() {
+    for _ in 1..100 {
+        print!("Hello World");
+    }
+}
+
+#[test_case]
+fn test_print_output() {
+    interrupts::without_interrupts(|| {
+        println!(); // Make sure no text is on the same line from previous tests
+        let printed_str = "Some random text";
+        print!("{}", printed_str);
+        let writer = WRITER.lock();
+        let row_position = writer.row_position;
+        for (i, c) in printed_str.chars().enumerate() {
+            let screen_char = writer.buffer.chars[row_position][i].read();
+            let ascii_char = char::from(screen_char.ascii_character);
+            assert_eq!(ascii_char, c);
+        }
+    })
 }
